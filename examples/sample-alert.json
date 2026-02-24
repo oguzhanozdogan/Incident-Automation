@@ -1,0 +1,7 @@
+{
+  "incidentId": "INC-2026-00421",
+  "source": "siem",
+  "title": "Possible malware callback activity",
+  "description": "EDR detected outbound traffic to https://example-bad-domain.test/payload and 185.220.101.1 from host WS-441. Additional domain: c2-control.example.net",
+  "details": "User opened suspicious link: http://phishing-sample.test/login"
+}

@@ -1,0 +1,572 @@
+{
+    "settings":  {
+                     "executionOrder":  "v1"
+                 },
+    "name":  "SecOps IOC Enrichment",
+    "tags":  [
+
+             ],
+    "nodes":  [
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a001",
+                      "name":  "Alert Webhook",
+                      "webhookId":  "secops-enrichment-webhook",
+                      "type":  "n8n-nodes-base.webhook",
+                      "position":  [
+                                       -1320,
+                                       200
+                                   ],
+                      "parameters":  {
+                                         "path":  "secops/enrich",
+                                         "responseMode":  "responseNode",
+                                         "options":  {
+
+                                                     },
+                                         "httpMethod":  "POST"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a002",
+                      "name":  "Extract IOCs",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       -1100,
+                                       200
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "const input = items[0]?.json ?? {};\nconst payload = input.body ?? input;\n\nconst textCandidates = [\n  payload.alert,\n  payload.message,\n  payload.description,\n  payload.details,\n  payload.raw,\n  payload.title,\n  JSON.stringify(payload),\n].filter((v) =\u003e typeof v === \u0027string\u0027);\n\nconst blob = textCandidates.join(\u0027\\n\u0027);\n\nconst ipRegex = /\\b(?:(?:25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\b/g;\nconst urlRegex = /\\bhttps?:\\/\\/[^\\s\u003c\u003e\"\u0027]+/gi;\nconst domainRegex = /\\b(?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,63}\\b/g;\n\nconst urls = Array.from(new Set((blob.match(urlRegex) || []).map((u) =\u003e u.replace(/[),.]+$/, \u0027\u0027))));\nconst ips = Array.from(new Set(blob.match(ipRegex) || []));\nconst allDomains = Array.from(new Set((blob.match(domainRegex) || []).map((d) =\u003e d.toLowerCase())));\n\nconst domainSet = new Set(allDomains);\nfor (const url of urls) {\n  try {\n    const hostname = new URL(url).hostname.toLowerCase();\n    domainSet.delete(hostname);\n  } catch {}\n}\n\nconst domains = Array.from(domainSet).filter((d) =\u003e !/^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(d));\nconst incidentId = String(payload.incidentId ?? payload.ticketId ?? payload.id ?? `incident-${Date.now()}`);\n\nreturn [\n  {\n    json: {\n      incidentId,\n      source: String(payload.source ?? \u0027webhook\u0027),\n      ticketing: payload.ticketing ?? {},\n      rawAlert: payload,\n      receivedAt: new Date().toISOString(),\n      iocSummary: {\n        ips,\n        domains,\n        urls,\n        total: ips.length + domains.length + urls.length,\n      },\n    },\n  },\n];",
+                                         "mode":  "runOnceForAllItems"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a003",
+                      "name":  "Has IOCs?",
+                      "type":  "n8n-nodes-base.if",
+                      "position":  [
+                                       -880,
+                                       200
+                                   ],
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "number":  [
+                                                                           {
+                                                                               "value1":  "={{$json.iocSummary.total}}",
+                                                                               "operation":  "larger",
+                                                                               "value2":  0
+                                                                           }
+                                                                       ]
+                                                        }
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a004",
+                      "name":  "No IOC Response",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "position":  [
+                                       -650,
+                                       340
+                                   ],
+                      "parameters":  {
+                                         "responseBody":  "={{ { \"status\": \"no_ioc_detected\", \"incidentId\": $json.incidentId, \"message\": \"No indicators were extracted from alert payload.\" } }}",
+                                         "respondWith":  "json",
+                                         "options":  {
+                                                         "responseCode":  200
+                                                     }
+                                     },
+                      "typeVersion":  1.1
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a005",
+                      "name":  "Expand Indicators",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       -650,
+                                       80
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "const base = items[0]?.json ?? {};\nconst out = [];\nlet index = 0;\n\nconst map = {\n  ip: base.iocSummary?.ips ?? [],\n  domain: base.iocSummary?.domains ?? [],\n  url: base.iocSummary?.urls ?? [],\n};\n\nfor (const [type, values] of Object.entries(map)) {\n  for (const value of values) {\n    out.push({\n      json: {\n        incidentId: base.incidentId,\n        source: base.source,\n        receivedAt: base.receivedAt,\n        ticketing: base.ticketing,\n        rawAlert: base.rawAlert,\n        indicator: {\n          id: `ioc-${++index}`,\n          type,\n          value,\n        },\n      },\n    });\n  }\n}\n\nreturn out;",
+                                         "mode":  "runOnceForAllItems"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a006",
+                      "name":  "VT Throttle",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       -420,
+                                       -40
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "const delay = Number($env.VT_DELAY_MS ?? 300);\nif (delay \u003e 0) {\n  await new Promise((resolve) =\u003e setTimeout(resolve, delay));\n}\nreturn item;",
+                                         "mode":  "runOnceForEachItem"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "GET",
+                                         "url":  "={{ $json.indicator.type === \"ip\" ? \"https://www.virustotal.com/api/v3/ip_addresses/\" + encodeURIComponent($json.indicator.value) : $json.indicator.type === \"domain\" ? \"https://www.virustotal.com/api/v3/domains/\" + encodeURIComponent($json.indicator.value) : \"https://www.virustotal.com/api/v3/urls/\" + Buffer.from($json.indicator.value).toString(\"base64\").replace(/=/g, \"\").replace(/\\+/g, \"-\").replace(/\\//g, \"_\") }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "value":  "={{$env.VIRUSTOTAL_API_KEY}}",
+                                                                                         "name":  "x-apikey"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "options":  {
+                                                         "timeout":  30000
+                                                     }
+                                     },
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a007",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "retryOnFail":  true,
+                      "name":  "VirusTotal Lookup",
+                      "waitBetweenTries":  2000,
+                      "maxTries":  3,
+                      "position":  [
+                                       -180,
+                                       -40
+                                   ],
+                      "typeVersion":  4.2,
+                      "continueOnFail":  true
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a008",
+                      "name":  "Wrap VT Response",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       40,
+                                       -40
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "return {\n  json: {\n    vt_response: item.json,\n  },\n};",
+                                         "mode":  "runOnceForEachItem"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a009",
+                      "name":  "Attach VT",
+                      "type":  "n8n-nodes-base.merge",
+                      "position":  [
+                                       250,
+                                       -40
+                                   ],
+                      "parameters":  {
+                                         "combineBy":  "combineByPosition",
+                                         "options":  {
+
+                                                     },
+                                         "mode":  "combine"
+                                     },
+                      "typeVersion":  3
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a010",
+                      "name":  "urlscan Throttle",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       -420,
+                                       180
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "const delay = Number($env.URLSCAN_DELAY_MS ?? 600);\nif (delay \u003e 0) {\n  await new Promise((resolve) =\u003e setTimeout(resolve, delay));\n}\nreturn item;",
+                                         "mode":  "runOnceForEachItem"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "GET",
+                                         "url":  "={{ \"https://urlscan.io/api/v1/search/?size=1\u0026q=\" + encodeURIComponent($json.indicator.type === \"url\" ? `page.url:\\\"${$json.indicator.value}\\\"` : `${$json.indicator.type}:${$json.indicator.value}`) }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "value":  "={{$env.URLSCAN_API_KEY}}",
+                                                                                         "name":  "API-Key"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "options":  {
+                                                         "timeout":  30000
+                                                     }
+                                     },
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a011",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "retryOnFail":  true,
+                      "name":  "urlscan Lookup",
+                      "waitBetweenTries":  2000,
+                      "maxTries":  3,
+                      "position":  [
+                                       -180,
+                                       180
+                                   ],
+                      "typeVersion":  4.2,
+                      "continueOnFail":  true
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a012",
+                      "name":  "Wrap urlscan Response",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       40,
+                                       180
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "return {\n  json: {\n    urlscan_response: item.json,\n  },\n};",
+                                         "mode":  "runOnceForEachItem"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a013",
+                      "name":  "Attach urlscan",
+                      "type":  "n8n-nodes-base.merge",
+                      "position":  [
+                                       250,
+                                       180
+                                   ],
+                      "parameters":  {
+                                         "combineBy":  "combineByPosition",
+                                         "options":  {
+
+                                                     },
+                                         "mode":  "combine"
+                                     },
+                      "typeVersion":  3
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a014",
+                      "name":  "Combine Intel",
+                      "type":  "n8n-nodes-base.merge",
+                      "position":  [
+                                       470,
+                                       80
+                                   ],
+                      "parameters":  {
+                                         "combineBy":  "combineByPosition",
+                                         "options":  {
+
+                                                     },
+                                         "mode":  "combine"
+                                     },
+                      "typeVersion":  3
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a015",
+                      "name":  "Normalize Enrichment",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       690,
+                                       80
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "if (items.length === 0) {\n  return [];\n}\n\nconst indicators = [];\nfor (const row of items) {\n  const r = row.json;\n  const vtStats = r.vt_response?.data?.attributes?.last_analysis_stats ?? null;\n  const vtMalicious = Number(vtStats?.malicious ?? 0);\n  const vtSuspicious = Number(vtStats?.suspicious ?? 0);\n\n  const urlscanHit = r.urlscan_response?.results?.[0] ?? null;\n  const urlscanMalicious = Boolean(urlscanHit?.verdicts?.overall?.malicious ?? false);\n  const urlscanScore = Number(urlscanHit?.verdicts?.overall?.score ?? 0);\n\n  let riskScore = 0;\n  riskScore += vtMalicious \u003e 0 ? 70 : 0;\n  riskScore += vtSuspicious \u003e 0 ? 15 : 0;\n  riskScore += urlscanMalicious ? 30 : 0;\n  riskScore += Math.max(0, Math.min(20, urlscanScore));\n  riskScore = Math.min(100, riskScore);\n\n  let verdict = \u0027low\u0027;\n  if (riskScore \u003e= 70) {\n    verdict = \u0027high\u0027;\n  } else if (riskScore \u003e= 40) {\n    verdict = \u0027medium\u0027;\n  } else if (!vtStats \u0026\u0026 !urlscanHit) {\n    verdict = \u0027unknown\u0027;\n  }\n\n  indicators.push({\n    id: r.indicator?.id,\n    type: r.indicator?.type,\n    value: r.indicator?.value,\n    verdict,\n    riskScore,\n    virustotal: {\n      stats: vtStats,\n      malicious: vtMalicious,\n      suspicious: vtSuspicious,\n      error: r.vt_response?.error ?? null,\n    },\n    urlscan: {\n      found: Boolean(urlscanHit),\n      score: urlscanScore,\n      malicious: urlscanMalicious,\n      result: urlscanHit,\n      error: r.urlscan_response?.error ?? r.urlscan_response?.message ?? null,\n    },\n  });\n}\n\nconst summary = {\n  totalIndicators: indicators.length,\n  suspiciousIndicators: indicators.filter((i) =\u003e [\u0027medium\u0027, \u0027high\u0027].includes(i.verdict)).length,\n  highSeverityIndicators: indicators.filter((i) =\u003e i.verdict === \u0027high\u0027).length,\n};\n\nreturn [\n  {\n    json: {\n      incidentId: items[0].json.incidentId,\n      generatedAt: new Date().toISOString(),\n      enrichmentSummary: summary,\n      indicators,\n      rawAlert: items[0].json.rawAlert,\n      ticketing: items[0].json.ticketing,\n    },\n  },\n];",
+                                         "mode":  "runOnceForAllItems"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a016",
+                      "name":  "Build Ticket Payload",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       910,
+                                       80
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "const data = items[0].json;\n\nconst lines = [\n  \u0027### Automated IOC Enrichment\u0027,\n  \u0027\u0027,\n  `Incident: ${data.incidentId}`,\n  `Generated: ${data.generatedAt}`,\n  `Total indicators: ${data.enrichmentSummary.totalIndicators}`,\n  `Suspicious indicators: ${data.enrichmentSummary.suspiciousIndicators}`,\n  `High severity indicators: ${data.enrichmentSummary.highSeverityIndicators}`,\n  \u0027\u0027,\n  \u0027#### Indicator Findings\u0027,\n];\n\nfor (const i of data.indicators) {\n  lines.push(`- [${i.type}] ${i.value} -\u003e ${i.verdict.toUpperCase()} (score: ${i.riskScore})`);\n}\n\nreturn [\n  {\n    json: {\n      incidentId: data.incidentId,\n      enrichmentSummary: data.enrichmentSummary,\n      indicators: data.indicators,\n      markdownComment: lines.join(\u0027\\n\u0027),\n      ticketing: data.ticketing,\n      rawAlert: data.rawAlert,\n    },\n  },\n];",
+                                         "mode":  "runOnceForAllItems"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "parameters":  {
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "value":  "application/json",
+                                                                                         "name":  "Content-Type"
+                                                                                     },
+                                                                                     {
+                                                                                         "value":  "={{$env.TICKETING_API_TOKEN ? \"Bearer \" + $env.TICKETING_API_TOKEN : \"\"}}",
+                                                                                         "name":  "Authorization"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "method":  "POST",
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{$json}}",
+                                         "url":  "={{$env.TICKETING_WEBHOOK_URL}}",
+                                         "sendHeaders":  true,
+                                         "options":  {
+                                                         "timeout":  30000
+                                                     },
+                                         "sendBody":  true
+                                     },
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a017",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "retryOnFail":  true,
+                      "name":  "Update Incident Ticket",
+                      "waitBetweenTries":  2000,
+                      "maxTries":  2,
+                      "position":  [
+                                       1130,
+                                       80
+                                   ],
+                      "typeVersion":  4.2,
+                      "continueOnFail":  true
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a018",
+                      "name":  "Wrap Ticket Response",
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       1350,
+                                       80
+                                   ],
+                      "parameters":  {
+                                         "jsCode":  "return {\n  json: {\n    ticket_update_response: item.json,\n  },\n};",
+                                         "mode":  "runOnceForEachItem"
+                                     },
+                      "typeVersion":  2
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a019",
+                      "name":  "Attach Ticket Response",
+                      "type":  "n8n-nodes-base.merge",
+                      "position":  [
+                                       1570,
+                                       80
+                                   ],
+                      "parameters":  {
+                                         "combineBy":  "combineByPosition",
+                                         "options":  {
+
+                                                     },
+                                         "mode":  "combine"
+                                     },
+                      "typeVersion":  3
+                  },
+                  {
+                      "id":  "a5c6de67-e13a-4d17-907b-1d4220f5a020",
+                      "name":  "Success Response",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "position":  [
+                                       1790,
+                                       80
+                                   ],
+                      "parameters":  {
+                                         "responseBody":  "={{ { \"status\": \"enriched\", \"incidentId\": $json.incidentId, \"totalIndicators\": $json.enrichmentSummary.totalIndicators, \"suspiciousIndicators\": $json.enrichmentSummary.suspiciousIndicators, \"highSeverityIndicators\": $json.enrichmentSummary.highSeverityIndicators, \"ticketUpdate\": $json.ticket_update_response } }}",
+                                         "respondWith":  "json",
+                                         "options":  {
+                                                         "responseCode":  200
+                                                     }
+                                     },
+                      "typeVersion":  1.1
+                  }
+              ],
+    "connections":  {
+                        "Has IOCs?":  {
+                                          "main":  [
+                                                       [
+                                                           {
+                                                               "node":  "Expand Indicators",
+                                                               "type":  "main",
+                                                               "index":  0
+                                                           }
+                                                       ],
+                                                       [
+                                                           {
+                                                               "node":  "No IOC Response",
+                                                               "type":  "main",
+                                                               "index":  0
+                                                           }
+                                                       ]
+                                                   ]
+                                      },
+                        "Normalize Enrichment":  {
+                                                     "main":  [
+                                                                  {
+                                                                      "node":  "Build Ticket Payload",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  }
+                                                              ]
+                                                 },
+                        "urlscan Throttle":  {
+                                                 "main":  [
+                                                              {
+                                                                  "node":  "urlscan Lookup",
+                                                                  "type":  "main",
+                                                                  "index":  0
+                                                              }
+                                                          ]
+                                             },
+                        "Attach Ticket Response":  {
+                                                       "main":  [
+                                                                    {
+                                                                        "node":  "Success Response",
+                                                                        "type":  "main",
+                                                                        "index":  0
+                                                                    }
+                                                                ]
+                                                   },
+                        "Extract IOCs":  {
+                                             "main":  [
+                                                          {
+                                                              "node":  "Has IOCs?",
+                                                              "type":  "main",
+                                                              "index":  0
+                                                          }
+                                                      ]
+                                         },
+                        "Update Incident Ticket":  {
+                                                       "main":  [
+                                                                    {
+                                                                        "node":  "Wrap Ticket Response",
+                                                                        "type":  "main",
+                                                                        "index":  0
+                                                                    }
+                                                                ]
+                                                   },
+                        "Expand Indicators":  {
+                                                  "main":  [
+                                                               {
+                                                                   "node":  "VT Throttle",
+                                                                   "type":  "main",
+                                                                   "index":  0
+                                                               },
+                                                               {
+                                                                   "node":  "Attach VT",
+                                                                   "type":  "main",
+                                                                   "index":  0
+                                                               },
+                                                               {
+                                                                   "node":  "urlscan Throttle",
+                                                                   "type":  "main",
+                                                                   "index":  0
+                                                               },
+                                                               {
+                                                                   "node":  "Attach urlscan",
+                                                                   "type":  "main",
+                                                                   "index":  0
+                                                               }
+                                                           ]
+                                              },
+                        "Alert Webhook":  {
+                                              "main":  [
+                                                           {
+                                                               "node":  "Extract IOCs",
+                                                               "type":  "main",
+                                                               "index":  0
+                                                           }
+                                                       ]
+                                          },
+                        "Combine Intel":  {
+                                              "main":  [
+                                                           {
+                                                               "node":  "Normalize Enrichment",
+                                                               "type":  "main",
+                                                               "index":  0
+                                                           }
+                                                       ]
+                                          },
+                        "Wrap urlscan Response":  {
+                                                      "main":  [
+                                                                   {
+                                                                       "node":  "Attach urlscan",
+                                                                       "type":  "main",
+                                                                       "index":  1
+                                                                   }
+                                                               ]
+                                                  },
+                        "Build Ticket Payload":  {
+                                                     "main":  [
+                                                                  {
+                                                                      "node":  "Update Incident Ticket",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  },
+                                                                  {
+                                                                      "node":  "Attach Ticket Response",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  }
+                                                              ]
+                                                 },
+                        "Attach urlscan":  {
+                                               "main":  [
+                                                            {
+                                                                "node":  "Combine Intel",
+                                                                "type":  "main",
+                                                                "index":  1
+                                                            }
+                                                        ]
+                                           },
+                        "VT Throttle":  {
+                                            "main":  [
+                                                         {
+                                                             "node":  "VirusTotal Lookup",
+                                                             "type":  "main",
+                                                             "index":  0
+                                                         }
+                                                     ]
+                                        },
+                        "VirusTotal Lookup":  {
+                                                  "main":  [
+                                                               {
+                                                                   "node":  "Wrap VT Response",
+                                                                   "type":  "main",
+                                                                   "index":  0
+                                                               }
+                                                           ]
+                                              },
+                        "Attach VT":  {
+                                          "main":  [
+                                                       {
+                                                           "node":  "Combine Intel",
+                                                           "type":  "main",
+                                                           "index":  0
+                                                       }
+                                                   ]
+                                      },
+                        "urlscan Lookup":  {
+                                               "main":  [
+                                                            {
+                                                                "node":  "Wrap urlscan Response",
+                                                                "type":  "main",
+                                                                "index":  0
+                                                            }
+                                                        ]
+                                           },
+                        "Wrap Ticket Response":  {
+                                                     "main":  [
+                                                                  {
+                                                                      "node":  "Attach Ticket Response",
+                                                                      "type":  "main",
+                                                                      "index":  1
+                                                                  }
+                                                              ]
+                                                 },
+                        "Wrap VT Response":  {
+                                                 "main":  [
+                                                              {
+                                                                  "node":  "Attach VT",
+                                                                  "type":  "main",
+                                                                  "index":  1
+                                                              }
+                                                          ]
+                                             }
+                    },
+    "active":  false
+}
+
+
